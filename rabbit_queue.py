@@ -46,15 +46,14 @@ class RabbitQueue:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def exec(self, payload):
-        print(f" [.] Executing task with payload {payload}")
-        result = self.op.exec(payload)
-        return {"result": result}
+        print(f"[QUEUE] Executing task with payload {payload}")
+        try :
+            result = self.op.exec(payload)
+        except Exception as e:
+            print(f"[QUEUE] Error executing task: {e}")
+            return {"success": False, "result": str(e)}
+        return {"success": True, "result": result}
     
-    # def forecast(self, payload):
-    #     print(f" [.] Forecasting with payload {payload}")
-    #     result = self.forecaster.exec(payload)
-    #     return {"result": result}
-
     def start(self):
-        print(f"[!] Node listening on {self.queue_name}")
+        print(f"[QUEUE] Node listening on {self.queue_name}")
         self.channel.start_consuming()

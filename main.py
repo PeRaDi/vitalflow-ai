@@ -31,7 +31,7 @@ class Node:
     
     async def run(self):
         """Initializes the node, setting up the database and starting the queue."""
-        print(f'[!] Setting up node as a {self.type}.')
+        print(f'<!> Setting up node as a {self.type}.')
         await self.db.setup_database()
         self.queue.start()
 

@@ -107,14 +107,14 @@ class Trainer:
         auth = (os.getenv('CDN_USERNAME'), os.getenv('CDN_PASSWORD'))
         url = f"{host}/{path}"
 
-        print(f"Uploading model to {url}")
+        print(f"[TRAINER] Uploading model to {url}")
 
         with open(save_path, 'rb') as f:
             response = requests.put(url, headers={"Content-Type": "application/octet-stream"}, data=f, auth=auth)
             response.raise_for_status()
 
         os.remove(save_path)
-        print(f"Model uploaded and removed locally: {url}")
+        print(f"[TRAINER] Model uploaded and removed locally: {url}")
 
     def exec(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         item_id = payload.get('item_id')
@@ -142,7 +142,7 @@ class Trainer:
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-        print(f"Starting training for item_id {item_id}")
+        print(f"[TRAINER] Starting training for item_id {item_id}")
         self.train_model(model, train_loader, criterion, optimizer)
 
         self._save_model(model, save_path, item_id)
