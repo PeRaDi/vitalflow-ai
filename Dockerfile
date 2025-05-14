@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip3 install --upgrade pip && pip3 install -r requirements.txt
+RUN pip3 install --upgrade pip && pip3 install -r ./requirements.txt
 
 # Copy application files
 COPY . .
