@@ -10,7 +10,6 @@ from datetime import datetime
 import requests
 from models.bilstm_model import BiLSTMModel
 from models.demand_dataset import DemandDataset
-import time
 
 class Trainer:
     def __init__(self, db, device):
@@ -33,7 +32,7 @@ class Trainer:
 
     def prepare_data(self, data):
         # Convert SQL data to DataFrame
-        df = pd.DataFrame(data, columns=['itemid', 'date', 'total_sales'])
+        df = pd.DataFrame(data, columns=['date', 'total_sales'])
         
         # Sort by date
         df['date'] = pd.to_datetime(df['date'])
@@ -104,7 +103,6 @@ class Trainer:
             'training_date': datetime.now().isoformat(),
         }, save_path)
         print(f"<!> Model saved to {save_path}")
-        time.sleep(600)
         
         host = f"http://{os.getenv('CDN_HOST')}"
         path = f"{os.getenv('CDN_MODELS_PATH')}/lstm_model_item_{item_id}.pth"

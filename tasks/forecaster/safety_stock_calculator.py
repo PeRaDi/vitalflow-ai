@@ -17,10 +17,10 @@ class SafetyStockCalculator:
     """
     
     def __init__(self, db, item_id: int, lead_time: int, forecast_horizon_days: int, ai_forecast: float, forecast_accuracy: float = 0.85):
-        self.db = db,
+        self.db = db
         self.item_id = item_id
         self.lead_time = lead_time
-        self.ai_forecast = ai_forecast 
+        self.ai_forecast = float(ai_forecast)
         self.forecast_horizon_days = forecast_horizon_days
         self.forecast_accuracy = forecast_accuracy
         self.analysis_window = forecast_horizon_days * 6  # 90 days for 15-day forecast
@@ -49,7 +49,7 @@ class SafetyStockCalculator:
     def prepare_data(self, data: List[Tuple]) -> Dict:
         return {
             'id': self.item_id,
-            'usage_history': [(str(date), quantity) for date, quantity in data]
+            'usage_history': [(str(date), float(quantity)) for date, quantity in data]
         }
             
     def calculate_abc_xyz_classification(self, item_data: Dict) -> Tuple[str, str]:
@@ -132,7 +132,9 @@ class SafetyStockCalculator:
         }
     
     def exec(self):
-        data = self.prepare_data(self.db.get_item_data(self.item_id))
+        data = self.db.get_item_data(self.item_id)
+    
+        data = self.prepare_data(data)
 
         # Get ABC/XYZ classification
         abc_class, xyz_class = self.calculate_abc_xyz_classification(data)
@@ -142,7 +144,7 @@ class SafetyStockCalculator:
         stats = self.get_weighted_statistics(data['usage_history'], self.analysis_window)
 
         # Calculate daily forecast from n-days total
-        daily_forecast = self.ai_forecast / self.forecast_horizon
+        daily_forecast = self.ai_forecast / self.forecast_horizon_days
 
         # Get safety factor for this category
         safety_factor = self.safety_factors.get(category, 0.10)
@@ -155,7 +157,7 @@ class SafetyStockCalculator:
         adjusted_safety_factor = safety_factor * confidence_adjustment * variability_adjustment
 
         # Calculate safety stock as percentage of forecast
-        base_safety_stock = self.ai_forecast_days * self.adjusted_safety_factor
+        base_safety_stock = self.ai_forecast * adjusted_safety_factor
         
         # Apply lead time adjustment
         abc_category = category[0]
@@ -163,7 +165,7 @@ class SafetyStockCalculator:
         
         # Final safety stock calculation
         safety_stock = base_safety_stock * np.sqrt(adjusted_lead_time / self.lead_time)  # Scale by lead time
-        
+
         # Calculate reorder point
         reorder_point = (daily_forecast * adjusted_lead_time) + safety_stock
         
@@ -173,7 +175,7 @@ class SafetyStockCalculator:
         return {
             'item_id': self.item_id,
             'abc_xyz_category': category,
-            'ai_forecast': self.ai_forecast_days,
+            'ai_forecast': self.ai_forecast,
             'daily_forecast': daily_forecast,
             'historical_daily_avg': stats['weighted_mean'],
             'historical_std': stats['weighted_std'],
@@ -188,7 +190,7 @@ class SafetyStockCalculator:
             'safety_stock': round(safety_stock, 0),
             'reorder_point': round(reorder_point, 0),
             'days_of_supply': round(days_of_supply, 1),
-            'safety_stock_percentage': round((safety_stock / self.ai_forecast_days * 100), 1) if self.ai_forecast_days > 0 else 0,
+            'safety_stock_percentage': round((safety_stock / self.ai_forecast * 100), 1) if self.ai_forecast > 0 else 0,
             'data_points_analyzed': stats['data_points']
         }
 

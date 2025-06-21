@@ -75,4 +75,4 @@ class Forecaster:
         forecasted_value = forecast_df['forecast'].sum()
         safetyStockCalculator = SafetyStockCalculator(self.db, item_id, 7, 30, forecasted_value)
 
-        return safetyStockCalculator.exec(forecast_df)
+        return safetyStockCalculator.exec()
