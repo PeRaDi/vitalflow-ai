@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from models.bilstm_model import BiLSTMModel
-from safety_stock_calculator import SafetyStockCalculator
+from tasks.forecaster.safety_stock_calculator import SafetyStockCalculator
 
 class Forecaster:
     def __init__(self, db, device):
