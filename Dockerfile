@@ -24,6 +24,3 @@ COPY . .
 
 # Set default command
 ENTRYPOINT ["python3", "main.py"]
-
-# Allow overriding node_type with ENV at runtime
-CMD ["${NODE_TYPE}"]

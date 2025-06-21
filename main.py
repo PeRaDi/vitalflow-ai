@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import torch
 from dotenv import load_dotenv
@@ -37,11 +38,7 @@ class Node:
 
 if __name__ == '__main__':
     load_dotenv()
+    node_type = os.getenv('NODE_TYPE')
     
-    if len(sys.argv) < 2:
-        print("Usage: python node.py <node_type>")
-        sys.exit(1)
-    
-    node_type = sys.argv[1]
     node = Node(node_type)
     asyncio.run(node.run())
