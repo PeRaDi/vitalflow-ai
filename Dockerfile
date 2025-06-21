@@ -23,7 +23,7 @@ RUN pip3 install --upgrade pip && pip3 install -r ./requirements.txt
 COPY . .
 
 # Set default command
-ENTRYPOINT ["python3", "node.py"]
+ENTRYPOINT ["python3", "main.py"]
 
 # Allow overriding node_type with ENV at runtime
 CMD ["${NODE_TYPE}"]
