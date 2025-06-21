@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-from types.bilstm_model import BiLSTMModel
+from models.bilstm_model import BiLSTMModel
 from safety_stock_calculator import SafetyStockCalculator
 
 class Forecaster:

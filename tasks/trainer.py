@@ -8,8 +8,8 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader
 from datetime import datetime
 import requests
-from types.bilstm_model import BiLSTMModel
-from types.demand_dataset import DemandDataset
+from models.bilstm_model import BiLSTMModel
+from models.demand_dataset import DemandDataset
 import time
 
 class Trainer:
