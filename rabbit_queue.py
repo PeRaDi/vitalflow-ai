@@ -1,4 +1,4 @@
-from tasks.forecaster import Forecaster
+from tasks.forecaster.forecaster import Forecaster
 from tasks.trainer import Trainer
 import pika
 import json
@@ -22,7 +22,7 @@ class RabbitQueue:
         if type == 'trainer':
             self.op = Trainer(db, device)
         elif type == 'forecaster':
-            self.op = Forecaster(db)
+            self.op = Forecaster(db, device)
             
         self.channel.queue_declare(queue=self.queue_name)
         
@@ -46,14 +46,13 @@ class RabbitQueue:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def exec(self, payload):
-        print(f"[QUEUE] Executing task with payload {payload}")
-        try :
+        print(f"<!> Executing task with payload {payload}")
+        try:
             result = self.op.exec(payload)
         except Exception as e:
-            print(f"[QUEUE] Error executing task: {e}")
-            return {"success": False, "result": str(e)}
+            result = {"success": False, "error": str(e)}
         return {"success": True, "result": result}
     
     def start(self):
-        print(f"[QUEUE] Node listening on {self.queue_name}")
+        print(f"<!> Node listening on {self.queue_name}")
         self.channel.start_consuming()
