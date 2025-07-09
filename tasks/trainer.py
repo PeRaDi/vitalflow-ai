@@ -392,11 +392,21 @@ class Trainer:
             return None
 
     def train_configs_parallel(self, data, seasonality_combinations):
-        """Train multiple configurations in parallel using CUDA streams"""
+        """Train multiple configurations in parallel using CUDA streams, handling memory constraints intelligently"""
         print(f"  - Training {len(seasonality_combinations)} configurations in parallel...")
         
-        # Check GPU memory and adjust parameters
-        max_parallel, adjusted_batch_size = self.check_gpu_memory_and_adjust_params(len(seasonality_combinations))
+        # Check GPU memory and determine optimal parallel count
+        max_parallel, preserved_batch_size = self.check_gpu_memory_and_adjust_params(len(seasonality_combinations))
+        
+        # If we can't fit all models in parallel, use hybrid approach
+        if max_parallel < len(seasonality_combinations):
+            return self._train_configs_hybrid(data, seasonality_combinations, max_parallel, preserved_batch_size)
+        else:
+            return self._train_configs_full_parallel(data, seasonality_combinations, max_parallel, preserved_batch_size)
+    
+    def _train_configs_full_parallel(self, data, seasonality_combinations, max_parallel, batch_size):
+        """Train all configurations in parallel when memory allows"""
+        print(f"  - 🚀 Full parallel mode: Training all {len(seasonality_combinations)} models simultaneously")
         
         # Create CUDA streams for parallel execution
         streams = []
@@ -415,7 +425,7 @@ class Trainer:
             """Train a single configuration on a specific CUDA stream"""
             try:
                 stream = streams[stream_idx] if streams[stream_idx] else None
-                result = self.train_and_evaluate_config_with_stream(data, config, stream, adjusted_batch_size)
+                result = self.train_and_evaluate_config_with_stream(data, config, stream, batch_size)
                 if result:
                     with results_lock:
                         results.append(result)
@@ -452,8 +462,38 @@ class Trainer:
                 if stream:
                     stream.synchronize()
         
-        print(f"  - Parallel training completed. {len(results)} successful configurations.")
+        print(f"  - Full parallel training completed. {len(results)} successful configurations.")
         return results
+    
+    def _train_configs_hybrid(self, data, seasonality_combinations, max_parallel, batch_size):
+        """Train configurations in batches when memory is limited"""
+        total_configs = len(seasonality_combinations)
+        print(f"  - 🔄 Hybrid mode: Training {max_parallel} models at a time (total: {total_configs})")
+        
+        all_results = []
+        remaining_configs = seasonality_combinations.copy()
+        batch_num = 1
+        
+        while remaining_configs:
+            # Take next batch of configurations
+            current_batch = remaining_configs[:max_parallel]
+            remaining_configs = remaining_configs[max_parallel:]
+            
+            print(f"  - Batch {batch_num}: Training {len(current_batch)} models...")
+            
+            # Train current batch in parallel
+            batch_results = self._train_configs_full_parallel(data, current_batch, len(current_batch), batch_size)
+            all_results.extend(batch_results)
+            
+            # Clear GPU memory between batches
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            print(f"  - Batch {batch_num} completed. {len(batch_results)} successful, {len(remaining_configs)} remaining.")
+            batch_num += 1
+        
+        print(f"  - Hybrid training completed. {len(all_results)} total successful configurations.")
+        return all_results
 
     def train_and_evaluate_config_with_stream(self, data, config, stream, batch_size):
         """Train and evaluate a model with specific seasonality configuration using CUDA stream"""
@@ -474,15 +514,12 @@ class Trainer:
         """Core training logic that can be used with or without CUDA streams"""
         X_train, y_train, X_test, y_test, scaler, feature_names = self.prepare_data_with_config(data, config)
         
-        # Use adjusted batch size for parallel training
-        parallel_batch_size = max(8, batch_size)
-        
-        # Create data loaders
+        # Use the exact batch size provided (preserving original batch size)
         train_dataset = DemandDataset(X_train, y_train)
-        train_loader = DataLoader(train_dataset, batch_size=parallel_batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         
         test_dataset = DemandDataset(X_test, y_test)
-        test_loader = DataLoader(test_dataset, batch_size=parallel_batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         # Initialize model
         input_size = len(config['features']) + 1  # +1 for sales
@@ -494,7 +531,7 @@ class Trainer:
             dropout_rate=self.dropout_rate
         ).to(self.device)
         
-        # Training setup
+        # Training setup - use same learning rate as original
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=0.001)
         
@@ -577,35 +614,123 @@ class Trainer:
             'targets': targets_orig
         }
 
+    def add_performance_timing(self, data, seasonality_combinations):
+        """Add timing information to compare parallel vs sequential performance"""
+        import time
+        
+        # Record start time
+        start_time = time.time()
+        
+        # Train in parallel
+        results = self.train_configs_parallel(data, seasonality_combinations)
+        
+        # Record end time and calculate performance metrics
+        end_time = time.time()
+        parallel_time = end_time - start_time
+        
+        # Estimate sequential time (based on average single model time)
+        if results:
+            avg_epochs_per_model = self.epochs
+            # Rough estimate: each epoch takes ~0.1-0.5 seconds depending on data size
+            estimated_time_per_model = avg_epochs_per_model * 0.3  # Conservative estimate
+            estimated_sequential_time = estimated_time_per_model * len(seasonality_combinations)
+            
+            speedup = estimated_sequential_time / parallel_time if parallel_time > 0 else 1
+            efficiency = (speedup / len(seasonality_combinations)) * 100
+            
+            print(f"\n  - 📊 Performance Summary:")
+            print(f"     Parallel time: {parallel_time:.1f}s")
+            print(f"     Estimated sequential time: {estimated_sequential_time:.1f}s")
+            print(f"     Speedup: {speedup:.1f}x")
+            print(f"     Parallel efficiency: {efficiency:.1f}%")
+            print(f"     Models trained: {len(results)}/{len(seasonality_combinations)}")
+        
+        return results
+
     def check_gpu_memory_and_adjust_params(self, num_configs):
-        """Check available GPU memory and adjust training parameters for parallel execution"""
+        """Check available GPU memory and determine optimal parallel count while preserving batch size"""
         if torch.cuda.is_available():
-            # Get GPU memory info
-            total_memory = torch.cuda.get_device_properties(self.device).total_memory
-            allocated_memory = torch.cuda.memory_allocated(self.device)
-            available_memory = total_memory - allocated_memory
+            # Get detailed GPU memory info
+            gpu_info = self.get_gpu_memory_info()
+            memory_req = self.estimate_model_memory_requirement()
             
-            # Estimate memory per model (rough estimation)
-            # BiLSTM model + data + gradients typically needs ~200-500MB per model
-            estimated_memory_per_model = 500 * 1024 * 1024  # 500MB per model
+            print(f"  - GPU: {gpu_info['device_name']}")
+            print(f"  - GPU Memory: {gpu_info['total'] / (1024**3):.1f}GB total, {gpu_info['available'] / (1024**3):.1f}GB available")
+            print(f"  - Estimated memory per model: {memory_req['total'] / (1024**2):.1f}MB")
+            print(f"    - Model params: {memory_req['model'] / (1024**2):.1f}MB")
+            print(f"    - Data (batch_size={self.batch_size}): {memory_req['data'] / (1024**2):.1f}MB")
+            print(f"    - Gradients + Optimizer: {(memory_req['gradients'] + memory_req['optimizer']) / (1024**2):.1f}MB")
             
-            # Calculate safe number of parallel models
-            safe_parallel_count = min(
-                num_configs,
-                max(1, int(available_memory * 0.8 / estimated_memory_per_model))  # Use 80% of available memory
-            )
+            # Calculate maximum parallel models that can fit while keeping original batch size
+            # Use 75% of available memory for safety
+            safe_memory = gpu_info['available'] * 0.75
+            max_parallel_with_full_batch = max(1, int(safe_memory / memory_req['total']))
             
-            # Adjust batch size based on parallel count
-            adjusted_batch_size = max(8, self.batch_size // safe_parallel_count)
+            # Limit to requested number of configurations
+            optimal_parallel_count = min(num_configs, max_parallel_with_full_batch)
             
-            print(f"  - GPU Memory: {total_memory / (1024**3):.1f}GB total, {available_memory / (1024**3):.1f}GB available")
-            print(f"  - Parallel streams: {safe_parallel_count} (max {num_configs})")
-            print(f"  - Adjusted batch size: {adjusted_batch_size} (original: {self.batch_size})")
+            print(f"  - Optimal parallel streams: {optimal_parallel_count} (requested: {num_configs})")
+            print(f"  - Batch size: {self.batch_size} (preserved)")
             
-            return safe_parallel_count, adjusted_batch_size
+            if optimal_parallel_count < num_configs:
+                remaining = num_configs - optimal_parallel_count
+                print(f"  - ⚠️  Memory constraint: Will use hybrid approach")
+                print(f"    - Parallel: {optimal_parallel_count} models simultaneously")
+                print(f"    - Sequential: {remaining} models in subsequent batches")
+            else:
+                print(f"  - ✅ Full parallel mode: All {num_configs} models can train simultaneously")
+            
+            return optimal_parallel_count, self.batch_size  # Keep original batch size
         else:
             print("  - Warning: CUDA not available, falling back to CPU sequential training")
             return 1, self.batch_size
+
+    def get_gpu_memory_info(self):
+        """Get detailed GPU memory information"""
+        if torch.cuda.is_available():
+            total_memory = torch.cuda.get_device_properties(self.device).total_memory
+            allocated_memory = torch.cuda.memory_allocated(self.device)
+            reserved_memory = torch.cuda.memory_reserved(self.device)
+            available_memory = total_memory - reserved_memory
+            
+            return {
+                'total': total_memory,
+                'allocated': allocated_memory,
+                'reserved': reserved_memory,
+                'available': available_memory,
+                'device_name': torch.cuda.get_device_name(self.device)
+            }
+        return None
+    
+    def estimate_model_memory_requirement(self):
+        """Estimate memory requirement for a single model based on actual architecture"""
+        # Model parameters estimation
+        lstm_params = 4 * (self.hidden_size * (self.hidden_size + 8 + 1)) * self.num_layers  # LSTM gates
+        output_params = self.hidden_size * 1  # Output layer
+        total_params = lstm_params + output_params
+        
+        # Memory components (in bytes)
+        model_memory = total_params * 4  # 4 bytes per float32 parameter
+        gradient_memory = model_memory  # Gradients same size as parameters
+        optimizer_memory = model_memory * 2  # Adam: momentum + variance
+        
+        # Data memory (worst case with max features)
+        max_features = 8  # Assume max 8 features (sales + 7 seasonality features)
+        data_memory = self.batch_size * self.seq_length * max_features * 4  # Input data
+        
+        # Additional buffers and overhead
+        buffer_memory = 50 * 1024 * 1024  # 50MB safety buffer
+        
+        total_estimated = model_memory + gradient_memory + optimizer_memory + data_memory + buffer_memory
+        
+        return {
+            'model': model_memory,
+            'gradients': gradient_memory,
+            'optimizer': optimizer_memory,
+            'data': data_memory,
+            'buffer': buffer_memory,
+            'total': total_estimated
+        }
 
     def calculate_training_metrics_from_model(self, model, scaler, data):
         """Calculate training metrics from the trained model"""
