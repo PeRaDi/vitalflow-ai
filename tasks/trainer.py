@@ -36,15 +36,8 @@ class Trainer:
         self._suppress_prophet_logs()
         
     def _suppress_prophet_logs(self):
-        prophet_logger = logging.getLogger('prophet')
-        prophet_logger.setLevel(logging.WARNING)
-        cmdstanpy_logger = logging.getLogger('cmdstanpy')
-        cmdstanpy_logger.setLevel(logging.WARNING)
-        fbprophet_logger = logging.getLogger('fbprophet')
-        fbprophet_logger.setLevel(logging.WARNING)
-        stan_logger = logging.getLogger('stan')
-        stan_logger.setLevel(logging.ERROR)
-        os.environ['CMDSTAN_VERBOSE'] = '0'
+        logging.getLogger('prophet').setLevel(logging.WARNING)
+        logging.getLogger('cmdstanpy').disabled = True
 
     def create_sequences(self, data, seq_length):
         sequences, targets = [], []
