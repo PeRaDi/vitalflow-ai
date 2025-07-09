@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 import requests
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.bilstm_model import BiLSTMModel
 from models.demand_dataset import DemandDataset
 from models.prophet_seasonality import ProphetSeasonalityExtractor
@@ -29,6 +31,7 @@ class Trainer:
         self.best_model_config = None
         self.seasonality_features = []
         self.use_prophet = False
+        self.print_lock = threading.Lock()  # Thread-safe printing
         
     def create_sequences(self, data, seq_length):
         sequences, targets = [], []
@@ -104,15 +107,9 @@ class Trainer:
         if has_enough_data:
             print(f"  - Prophet? : Yes")
             
-            # Test all seasonality combinations
-            all_results = []
+            # Test all seasonality combinations in parallel
             seasonality_combinations = self.prophet_extractor.get_seasonality_combinations()
-            
-            for config in seasonality_combinations:
-                print(f"  - Testing configuration: {config['features']}")
-                result = self.train_and_evaluate_config(data, config)
-                if result:
-                    all_results.append(result)
+            all_results = self.train_configs_parallel(data, seasonality_combinations)
             
             if not all_results:
                 raise ValueError("No valid configurations could be trained")
@@ -393,6 +390,222 @@ class Trainer:
         except Exception as e:
             print(f"    Error with configuration {config['name']}: {e}")
             return None
+
+    def train_configs_parallel(self, data, seasonality_combinations):
+        """Train multiple configurations in parallel using CUDA streams"""
+        print(f"  - Training {len(seasonality_combinations)} configurations in parallel...")
+        
+        # Check GPU memory and adjust parameters
+        max_parallel, adjusted_batch_size = self.check_gpu_memory_and_adjust_params(len(seasonality_combinations))
+        
+        # Create CUDA streams for parallel execution
+        streams = []
+        for i in range(max_parallel):
+            if torch.cuda.is_available():
+                stream = torch.cuda.Stream()
+                streams.append(stream)
+            else:
+                streams.append(None)  # CPU fallback
+        
+        # Thread-safe results collection
+        results = []
+        results_lock = threading.Lock()
+        
+        def train_with_stream(config, stream_idx):
+            """Train a single configuration on a specific CUDA stream"""
+            try:
+                stream = streams[stream_idx] if streams[stream_idx] else None
+                result = self.train_and_evaluate_config_with_stream(data, config, stream, adjusted_batch_size)
+                if result:
+                    with results_lock:
+                        results.append(result)
+                    with self.print_lock:
+                        print(f"  - ✓ Completed: {config['name']} (RMSE: {result['metrics']['rmse']:.4f})")
+                else:
+                    with self.print_lock:
+                        print(f"  - ✗ Failed: {config['name']}")
+            except Exception as e:
+                with self.print_lock:
+                    print(f"  - ✗ Error with {config['name']}: {e}")
+        
+        # Execute training in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            # Submit all tasks
+            future_to_config = {}
+            for i, config in enumerate(seasonality_combinations):
+                stream_idx = i % max_parallel
+                future = executor.submit(train_with_stream, config, stream_idx)
+                future_to_config[future] = config
+            
+            # Wait for all tasks to complete
+            for future in as_completed(future_to_config):
+                config = future_to_config[future]
+                try:
+                    future.result()  # This will raise any exception that occurred
+                except Exception as e:
+                    with self.print_lock:
+                        print(f"  - Exception in {config['name']}: {e}")
+        
+        # Synchronize all streams
+        if torch.cuda.is_available():
+            for stream in streams:
+                if stream:
+                    stream.synchronize()
+        
+        print(f"  - Parallel training completed. {len(results)} successful configurations.")
+        return results
+
+    def train_and_evaluate_config_with_stream(self, data, config, stream, batch_size):
+        """Train and evaluate a model with specific seasonality configuration using CUDA stream"""
+        try:
+            if stream and torch.cuda.is_available():
+                with torch.cuda.stream(stream):
+                    return self._train_config_core(data, config, batch_size)
+            else:
+                # CPU fallback or no stream
+                return self._train_config_core(data, config, batch_size)
+                
+        except Exception as e:
+            with self.print_lock:
+                print(f"    Error with configuration {config['name']}: {e}")
+            return None
+
+    def _train_config_core(self, data, config, batch_size):
+        """Core training logic that can be used with or without CUDA streams"""
+        X_train, y_train, X_test, y_test, scaler, feature_names = self.prepare_data_with_config(data, config)
+        
+        # Use adjusted batch size for parallel training
+        parallel_batch_size = max(8, batch_size)
+        
+        # Create data loaders
+        train_dataset = DemandDataset(X_train, y_train)
+        train_loader = DataLoader(train_dataset, batch_size=parallel_batch_size, shuffle=True)
+        
+        test_dataset = DemandDataset(X_test, y_test)
+        test_loader = DataLoader(test_dataset, batch_size=parallel_batch_size, shuffle=False)
+        
+        # Initialize model
+        input_size = len(config['features']) + 1  # +1 for sales
+        model = BiLSTMModel(
+            input_size=input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            output_size=1,
+            dropout_rate=self.dropout_rate
+        ).to(self.device)
+        
+        # Training setup
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        
+        # Train model
+        model.train()
+        for epoch in range(self.epochs):
+            total_loss = 0
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+                optimizer.zero_grad()
+                y_pred = model(X_batch)
+                loss = criterion(y_pred, y_batch)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            
+            # Reduced logging frequency for parallel training
+            if (epoch + 1) % 20 == 0:  # Print every 20 epochs
+                with self.print_lock:
+                    print(f"      {config['name']} - Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
+        
+        # Evaluate model
+        model.eval()
+        all_predictions = []
+        all_targets = []
+        
+        with torch.no_grad():
+            for X_batch, y_batch in test_loader:
+                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
+                y_pred = model(X_batch)
+                all_predictions.extend(y_pred.cpu().numpy())
+                all_targets.extend(y_batch.cpu().numpy())
+        
+        predictions = np.array(all_predictions)
+        targets = np.array(all_targets)
+        
+        # Inverse transform
+        feature_count = input_size
+        predictions_padded = np.column_stack([
+            predictions.flatten(),
+            *[np.zeros(len(predictions)) for _ in range(feature_count - 1)]
+        ])
+        targets_padded = np.column_stack([
+            targets.flatten(),
+            *[np.zeros(len(targets)) for _ in range(feature_count - 1)]
+        ])
+        
+        predictions_orig = scaler.inverse_transform(predictions_padded)[:, 0]
+        targets_orig = scaler.inverse_transform(targets_padded)[:, 0]
+        
+        # Calculate metrics
+        mse = mean_squared_error(targets_orig, predictions_orig)
+        rmse = np.sqrt(mse)
+        mae = mean_absolute_error(targets_orig, predictions_orig)
+        r2 = r2_score(targets_orig, predictions_orig)
+        mape = np.mean(np.abs((targets_orig - predictions_orig) / targets_orig)) * 100
+        
+        # Calculate directional accuracy
+        target_direction = np.diff(targets_orig) > 0
+        pred_direction = np.diff(predictions_orig) > 0
+        directional_accuracy = np.mean(target_direction == pred_direction) * 100
+        
+        metrics = {
+            'mse': float(mse),
+            'rmse': float(rmse),
+            'mae': float(mae),
+            'r2_score': float(r2),
+            'mape': float(mape),
+            'directional_accuracy': float(directional_accuracy),
+            'test_samples': len(targets_orig)
+        }
+        
+        return {
+            'config': config,
+            'metrics': metrics,
+            'model': model,
+            'scaler': scaler,
+            'feature_names': feature_names,
+            'predictions': predictions_orig,
+            'targets': targets_orig
+        }
+
+    def check_gpu_memory_and_adjust_params(self, num_configs):
+        """Check available GPU memory and adjust training parameters for parallel execution"""
+        if torch.cuda.is_available():
+            # Get GPU memory info
+            total_memory = torch.cuda.get_device_properties(self.device).total_memory
+            allocated_memory = torch.cuda.memory_allocated(self.device)
+            available_memory = total_memory - allocated_memory
+            
+            # Estimate memory per model (rough estimation)
+            # BiLSTM model + data + gradients typically needs ~200-500MB per model
+            estimated_memory_per_model = 500 * 1024 * 1024  # 500MB per model
+            
+            # Calculate safe number of parallel models
+            safe_parallel_count = min(
+                num_configs,
+                max(1, int(available_memory * 0.8 / estimated_memory_per_model))  # Use 80% of available memory
+            )
+            
+            # Adjust batch size based on parallel count
+            adjusted_batch_size = max(8, self.batch_size // safe_parallel_count)
+            
+            print(f"  - GPU Memory: {total_memory / (1024**3):.1f}GB total, {available_memory / (1024**3):.1f}GB available")
+            print(f"  - Parallel streams: {safe_parallel_count} (max {num_configs})")
+            print(f"  - Adjusted batch size: {adjusted_batch_size} (original: {self.batch_size})")
+            
+            return safe_parallel_count, adjusted_batch_size
+        else:
+            print("  - Warning: CUDA not available, falling back to CPU sequential training")
+            return 1, self.batch_size
 
     def calculate_training_metrics_from_model(self, model, scaler, data):
         """Calculate training metrics from the trained model"""

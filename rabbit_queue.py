@@ -53,7 +53,6 @@ class RabbitQueue:
     def exec(self, payload):
         try:
             result = self.op.exec(payload)
-            print(f"<!> Task executed successfully with result {result}")
         except Exception as e:
             result = {"success": False, "error": str(e)}
         return {"success": True, "result": result}
