@@ -22,9 +22,9 @@ class Database:
         try:
             config = self._load_config()
             self.conn = psycopg2.connect(**config)
-            print("[DB] Connection successfully established.")
+            print("<!> DB: Connection successfully established.")
         except (psycopg2.DatabaseError, Exception) as error:
-            print(f"[DB] Failed to connect to the database: {error}")
+            print(f"<!> DB: Failed to connect to the database: {error}")
             raise
 
     async def close_connection(self):
@@ -32,12 +32,12 @@ class Database:
         if self.conn:
             self.conn.close()
             self.conn = None
-            print("[DB] Database connection closed.")
+            print("<!> DB: Database connection closed.")
 
     def get_connection(self) -> connection:
         """Returns the active database connection or raises an error if not connected."""
         if not self.conn:
-            raise RuntimeError("[DB] Database connection has not been established.")
+            raise RuntimeError("<!> DB: Database connection has not been established.")
         return self.conn
     
     def get_item_data(self, item_id: int) -> Dict:
