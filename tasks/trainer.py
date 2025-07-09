@@ -11,6 +11,7 @@ from datetime import datetime
 import requests
 import json
 import threading
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.bilstm_model import BiLSTMModel
 from models.demand_dataset import DemandDataset
@@ -31,8 +32,20 @@ class Trainer:
         self.best_model_config = None
         self.seasonality_features = []
         self.use_prophet = False
-        self.print_lock = threading.Lock()  # Thread-safe printing
+        self.print_lock = threading.Lock() 
+        self._suppress_prophet_logs()
         
+    def _suppress_prophet_logs(self):
+        prophet_logger = logging.getLogger('prophet')
+        prophet_logger.setLevel(logging.WARNING)
+        cmdstanpy_logger = logging.getLogger('cmdstanpy')
+        cmdstanpy_logger.setLevel(logging.WARNING)
+        fbprophet_logger = logging.getLogger('fbprophet')
+        fbprophet_logger.setLevel(logging.WARNING)
+        stan_logger = logging.getLogger('stan')
+        stan_logger.setLevel(logging.ERROR)
+        os.environ['CMDSTAN_VERBOSE'] = '0'
+
     def create_sequences(self, data, seq_length):
         sequences, targets = [], []
         for i in range(len(data) - seq_length):
