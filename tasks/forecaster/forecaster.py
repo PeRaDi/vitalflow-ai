@@ -6,13 +6,23 @@ import pandas as pd
 from datetime import datetime, timedelta
 from models.bilstm_model import BiLSTMModel
 from tasks.forecaster.safety_stock_calculator import SafetyStockCalculator
+import logging
+import warnings
 
 class Forecaster:
     def __init__(self, db, device):
         self.db = db
         self.device = device
         self.seq_length = 30
-    
+
+    def _suppress_prophet_logs(self):
+        warnings.filterwarnings("ignore", message="Importing plotly failed")
+        warnings.filterwarnings("ignore", message=".*plotly.*", category=UserWarning)
+        logging.getLogger('prophet').setLevel(logging.ERROR)
+        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
+        logging.getLogger('prophet.forecaster').setLevel(logging.ERROR)
+        logging.getLogger('cmdstanpy').disabled = True
+
     def download_model(self, model):
         host = f"http://{os.getenv('CDN_HOST')}"
         path = f"{os.getenv('CDN_MODELS_PATH')}/{model}"

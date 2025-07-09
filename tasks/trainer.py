@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.bilstm_model import BiLSTMModel
 from models.demand_dataset import DemandDataset
 from models.prophet_seasonality import ProphetSeasonalityExtractor
+import warnings
 
 class Trainer:
     def __init__(self, db, device):
@@ -36,7 +37,11 @@ class Trainer:
         self._suppress_prophet_logs()
         
     def _suppress_prophet_logs(self):
-        logging.getLogger('prophet').setLevel(logging.WARNING)
+        warnings.filterwarnings("ignore", message="Importing plotly failed")
+        warnings.filterwarnings("ignore", message=".*plotly.*", category=UserWarning)
+        logging.getLogger('prophet').setLevel(logging.ERROR)
+        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
+        logging.getLogger('prophet.forecaster').setLevel(logging.ERROR)
         logging.getLogger('cmdstanpy').disabled = True
 
     def create_sequences(self, data, seq_length):
