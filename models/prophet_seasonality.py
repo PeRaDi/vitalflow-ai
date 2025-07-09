@@ -10,13 +10,13 @@ class ProphetSeasonalityExtractor:
     def get_seasonality_combinations(self):
         return [
             {'features': [], 'name': 'No_Seasonality', 'weekly': False, 'yearly': False, 'monthly': False},
-            # {'features': ['weekly'], 'name': 'Weekly_Only', 'weekly': True, 'yearly': False, 'monthly': False},
-            # {'features': ['yearly'], 'name': 'Yearly_Only', 'weekly': False, 'yearly': True, 'monthly': False},
-            # {'features': ['monthly'], 'name': 'Monthly_Only', 'weekly': False, 'yearly': False, 'monthly': True},
-            # {'features': ['weekly', 'yearly'], 'name': 'Weekly_Yearly', 'weekly': True, 'yearly': True, 'monthly': False},
-            # {'features': ['yearly', 'monthly'], 'name': 'Yearly_Monthly', 'weekly': False, 'yearly': True, 'monthly': True},
-            # {'features': ['weekly', 'monthly'], 'name': 'Weekly_Monthly', 'weekly': True, 'yearly': False, 'monthly': True},
-            # {'features': ['weekly', 'yearly', 'monthly'], 'name': 'All_Seasonality', 'weekly': True, 'yearly': True, 'monthly': True},
+            {'features': ['weekly'], 'name': 'Weekly_Only', 'weekly': True, 'yearly': False, 'monthly': False},
+            {'features': ['yearly'], 'name': 'Yearly_Only', 'weekly': False, 'yearly': True, 'monthly': False},
+            {'features': ['monthly'], 'name': 'Monthly_Only', 'weekly': False, 'yearly': False, 'monthly': True},
+            {'features': ['weekly', 'yearly'], 'name': 'Weekly_Yearly', 'weekly': True, 'yearly': True, 'monthly': False},
+            {'features': ['yearly', 'monthly'], 'name': 'Yearly_Monthly', 'weekly': False, 'yearly': True, 'monthly': True},
+            {'features': ['weekly', 'monthly'], 'name': 'Weekly_Monthly', 'weekly': True, 'yearly': False, 'monthly': True},
+            {'features': ['weekly', 'yearly', 'monthly'], 'name': 'All_Seasonality', 'weekly': True, 'yearly': True, 'monthly': True},
         ]
     
     def preprocess_for_prophet(self, data):

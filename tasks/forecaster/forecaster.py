@@ -36,9 +36,8 @@ class Forecaster:
         seasonality_features = checkpoint.get('seasonality_features', [])
         best_config = checkpoint.get('best_config', {})
         
-        print(f"<!> Loading model with configuration: {best_config.get('name', 'Unknown')}")
-        print(f"<!> Seasonality features: {seasonality_features}")
-        print(f"<!> Using Prophet: {use_prophet}")
+        print(f"  - Loading model with configuration: {seasonality_features}")
+        print(f"  - Prophet?: {use_prophet}")
         
         model = BiLSTMModel(
             input_size=input_size, 
@@ -113,9 +112,7 @@ class Forecaster:
                 input_seq[0, -1] = normalized_new_features
                 input_tensor = torch.tensor(input_seq, dtype=torch.float32).to(self.device)
         
-        else:
-            print(f"<!> Using simple LSTM forecasting (no seasonality)")
-            
+        else:            
             # Simple LSTM forecasting without seasonality
             input_seq = np.zeros((1, self.seq_length, 1))
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).to(self.device)
@@ -142,6 +139,8 @@ class Forecaster:
             predictions_orig = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
         
         forecast_df = pd.DataFrame({'date': future_dates, 'forecast': predictions_orig})
+
+        print(f"  - Done")
         return forecast_df
     
     def predict_seasonality_for_dates(self, prophet_model, dates, seasonality_features):
@@ -153,7 +152,8 @@ class Forecaster:
     
     def exec(self, payload):
         item_id = payload['item_id']
-        print(f"<!> Forecast for item {item_id}")
+        print("-" * 50)
+        print(f"<!> TRAINING ITEM_ID: {item_id}")
         model = f"prophet_bilstm_model_item_{item_id}.pth"
         
         try:
