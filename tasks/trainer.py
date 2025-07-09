@@ -102,6 +102,8 @@ class Trainer:
 
     def exec(self, payload):
         item_id = payload['item_id']
+        print("-" * 50)
+        print(f"<!> TRAINING ITEM_ID: {item_id}")
         save_path = payload.get('save_path', f'prophet_bilstm_model_item_{item_id}.pth')
         
         data = self.db.get_item_data(item_id)
@@ -112,10 +114,9 @@ class Trainer:
         prophet_data = [(row[0], row[1]) for row in data]  # Convert to tuple format
         prophet_df = self.prophet_extractor.preprocess_for_prophet(prophet_data)
         has_enough_data, message = self.prophet_extractor.check_data_volume(prophet_df)
-        print(f"<!> Data volume check: {message}")
         
         if has_enough_data:
-            print(f"<!> Using adaptive model selection - testing all seasonality combinations")
+            print(f"  - Prophet? : Yes")
             
             # Test all seasonality combinations
             all_results = []
@@ -131,16 +132,12 @@ class Trainer:
             
             # Select best model based on RMSE (lower is better)
             best_result = min(all_results, key=lambda x: x['metrics']['rmse'])
-            print(f"\n<!> ========== BEST MODEL SELECTION ==========")
-            print(f"<!> Best configuration: {best_result['config']['name']}")
-            print(f"<!> Best RMSE: {best_result['metrics']['rmse']:.4f}")
-            print(f"<!> Best features: {best_result['config']['features']}")
             
             # Store best model configuration
             self.best_model_config = best_result['config']
             self.use_prophet = len(best_result['config']['features']) > 0
             self.seasonality_features = best_result['config']['features']
-            
+
             # Use best model and its results
             model = best_result['model']
             scaler = best_result['scaler']
@@ -167,10 +164,9 @@ class Trainer:
             comparison_path = f'model_comparison_item_{item_id}.json'
             with open(comparison_path, 'w') as f:
                 json.dump(comparison_report, f, indent=2)
-            print(f"<!> Model comparison report saved to: {comparison_path}")
             
         else:
-            print(f"<!> Using fallback: Simple LSTM (no seasonality features)")
+            print(f"  - Prophet? : No")
             
             # Fallback to simple LSTM without seasonality
             fallback_config = {'features': [], 'name': 'Simple_LSTM_Fallback', 'weekly': False, 'yearly': False, 'monthly': False}
@@ -200,16 +196,16 @@ class Trainer:
                                                  best_result['targets'] if has_enough_data else result['targets'])
         
         # Print evaluation results
-        print(f"<!> Model Evaluation Results for item_id {item_id}:")
-        print(f"    Best Configuration: {self.best_model_config['name']}")
-        print(f"    Seasonality Features: {self.seasonality_features}")
-        print(f"    Test RMSE: {test_metrics['rmse']:.4f}")
-        print(f"    Test MAE: {test_metrics['mae']:.4f}")
-        print(f"    Test R²: {test_metrics['r2_score']:.4f}")
-        print(f"    Test MAPE: {test_metrics['mape']:.2f}%")
-        print(f"    Directional Accuracy: {test_metrics['directional_accuracy']:.2f}%")
-        print(f"    Train RMSE: {train_metrics['train_rmse']:.4f}")
-        print(f"    Train R²: {train_metrics['train_r2']:.4f}")
+        print(f"  - Model Evaluation Results for item_id {item_id}:")
+        print(f"     - Best Configuration: {self.best_model_config['name']}")
+        print(f"     - Seasonality Features: {self.seasonality_features}")
+        print(f"     - Test RMSE: {test_metrics['rmse']:.4f}")
+        print(f"     - Test MAE: {test_metrics['mae']:.4f}")
+        print(f"     - Test R²: {test_metrics['r2_score']:.4f}")
+        print(f"     - Test MAPE: {test_metrics['mape']:.2f}%")
+        print(f"     - Directional Accuracy: {test_metrics['directional_accuracy']:.2f}%")
+        print(f"     - Train RMSE: {train_metrics['train_rmse']:.4f}")
+        print(f"     - Train R²: {train_metrics['train_r2']:.4f}")
 
         # Save model with comprehensive metadata
         model_data = {
@@ -231,7 +227,6 @@ class Trainer:
             model_data['prophet_model'] = self.prophet_extractor.prophet_model
             
         torch.save(model_data, save_path)
-        print(f"<!> Best model saved to {save_path}")
         
         # Upload to CDN
         host = f"http://{os.getenv('CDN_HOST')}"
@@ -239,7 +234,7 @@ class Trainer:
         auth = (os.getenv('CDN_USERNAME'), os.getenv('CDN_PASSWORD'))
         url = f"{host}/{path}"
 
-        print(f"<!> Uploading model to {host}/{path}")
+        print(f"  - Uploading model to {host}/{path}")
         with open(save_path, 'rb') as f:
             headers = {"Content-Type": "application/octet-stream"}
             response = requests.put(url, headers=headers, data=f, auth=auth)
@@ -247,7 +242,7 @@ class Trainer:
             f.close()
         
         os.remove(save_path)
-        print(f"<!> Model saved to {host}/{path}")
+        print(f"  - Done")
         
         # Add evaluation metrics to payload
         payload['evaluation_metrics'] = all_metrics
@@ -358,7 +353,6 @@ class Trainer:
         """
         Save detailed evaluation report as JSON for further analysis
         """
-        import json
         
         report = {
             'item_id': item_id,
@@ -389,15 +383,10 @@ class Trainer:
         report_path = f'evaluation_report_item_{item_id}.json'
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
-        
-        print(f"<!> Evaluation report saved to {report_path}")
         return report_path
 
     def train_and_evaluate_config(self, data, config):
         """Train and evaluate a model with specific seasonality configuration"""
-        print(f"<!> Testing configuration: {config['name']}")
-        print(f"<!> Features: {config['features']}")
-        
         try:
             X_train, y_train, X_test, y_test, scaler, feature_names = self.prepare_data_with_config(data, config)
             
@@ -488,8 +477,6 @@ class Trainer:
                 'directional_accuracy': float(directional_accuracy),
                 'test_samples': len(targets_orig)
             }
-            
-            print(f"    Results: RMSE={rmse:.4f}, MAE={mae:.4f}, R²={r2:.4f}, MAPE={mape:.2f}%")
             
             return {
                 'config': config,
