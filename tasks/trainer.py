@@ -108,7 +108,7 @@ class Trainer:
         # Check if we have enough data for Prophet (2+ years)
         prophet_data = [(row[0], row[1]) for row in data]  # Convert to tuple format
         prophet_df = self.prophet_extractor.preprocess_for_prophet(prophet_data)
-        has_enough_data, message = self.prophet_extractor.check_data_volume(prophet_df)
+        has_enough_data, _ = self.prophet_extractor.check_data_volume(prophet_df)
         
         if has_enough_data:
             print(f"  - Prophet? : Yes")
@@ -318,7 +318,7 @@ class Trainer:
             
             # Train model (reduced epochs for faster comparison)
             model.train()
-            for epoch in range(self.epochs):
+            for _ in range(self.epochs):
                 total_loss = 0
                 for X_batch, y_batch in train_loader:
                     X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
@@ -329,9 +329,6 @@ class Trainer:
                     optimizer.step()
                     total_loss += loss.item()
                 
-                if (epoch + 1) % 10 == 0:  # Print every 10 epochs
-                    print(f"      Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
-            
             # Evaluate model
             model.eval()
             all_predictions = []
@@ -436,7 +433,7 @@ class Trainer:
                     with results_lock:
                         results.append(result)
                     with self.print_lock:
-                        print(f"  - ✓ Completed: {config['name']} (RMSE: {result['metrics']['rmse']:.4f})")
+                        print(f"  - Completed: {config['name']} (RMSE: {result['metrics']['rmse']:.4f})")
                 else:
                     with self.print_lock:
                         print(f"  - ✗ Failed: {config['name']}")
@@ -474,7 +471,7 @@ class Trainer:
     def _train_configs_hybrid(self, data, seasonality_combinations, max_parallel, batch_size):
         """Train configurations in batches when memory is limited"""
         total_configs = len(seasonality_combinations)
-        print(f"  - 🔄 Hybrid mode: Training {max_parallel} models at a time (total: {total_configs})")
+        print(f"  - Hybrid mode: Training {max_parallel} models at a time (total: {total_configs})")
         
         all_results = []
         remaining_configs = seasonality_combinations.copy()
@@ -484,8 +481,6 @@ class Trainer:
             # Take next batch of configurations
             current_batch = remaining_configs[:max_parallel]
             remaining_configs = remaining_configs[max_parallel:]
-            
-            print(f"  - Batch {batch_num}: Training {len(current_batch)} models...")
             
             # Train current batch in parallel
             batch_results = self._train_configs_full_parallel(data, current_batch, len(current_batch), batch_size)
@@ -543,7 +538,7 @@ class Trainer:
         
         # Train model
         model.train()
-        for epoch in range(self.epochs):
+        for _ in range(self.epochs):
             total_loss = 0
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
@@ -553,11 +548,6 @@ class Trainer:
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
-            
-            # Reduced logging frequency for parallel training
-            if (epoch + 1) % 20 == 0:  # Print every 20 epochs
-                with self.print_lock:
-                    print(f"      {config['name']} - Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
         
         # Evaluate model
         model.eval()
@@ -620,39 +610,6 @@ class Trainer:
             'targets': targets_orig
         }
 
-    def add_performance_timing(self, data, seasonality_combinations):
-        """Add timing information to compare parallel vs sequential performance"""
-        import time
-        
-        # Record start time
-        start_time = time.time()
-        
-        # Train in parallel
-        results = self.train_configs_parallel(data, seasonality_combinations)
-        
-        # Record end time and calculate performance metrics
-        end_time = time.time()
-        parallel_time = end_time - start_time
-        
-        # Estimate sequential time (based on average single model time)
-        if results:
-            avg_epochs_per_model = self.epochs
-            # Rough estimate: each epoch takes ~0.1-0.5 seconds depending on data size
-            estimated_time_per_model = avg_epochs_per_model * 0.3  # Conservative estimate
-            estimated_sequential_time = estimated_time_per_model * len(seasonality_combinations)
-            
-            speedup = estimated_sequential_time / parallel_time if parallel_time > 0 else 1
-            efficiency = (speedup / len(seasonality_combinations)) * 100
-            
-            print(f"\n  - 📊 Performance Summary:")
-            print(f"     Parallel time: {parallel_time:.1f}s")
-            print(f"     Estimated sequential time: {estimated_sequential_time:.1f}s")
-            print(f"     Speedup: {speedup:.1f}x")
-            print(f"     Parallel efficiency: {efficiency:.1f}%")
-            print(f"     Models trained: {len(results)}/{len(seasonality_combinations)}")
-        
-        return results
-
     def check_gpu_memory_and_adjust_params(self, num_configs):
         """Check available GPU memory and determine optimal parallel count while preserving batch size"""
         if torch.cuda.is_available():
@@ -660,12 +617,8 @@ class Trainer:
             gpu_info = self.get_gpu_memory_info()
             memory_req = self.estimate_model_memory_requirement()
             
-            print(f"  - GPU: {gpu_info['device_name']}")
-            print(f"  - GPU Memory: {gpu_info['total'] / (1024**3):.1f}GB total, {gpu_info['available'] / (1024**3):.1f}GB available")
-            print(f"  - Estimated memory per model: {memory_req['total'] / (1024**2):.1f}MB")
-            print(f"    - Model params: {memory_req['model'] / (1024**2):.1f}MB")
-            print(f"    - Data (batch_size={self.batch_size}): {memory_req['data'] / (1024**2):.1f}MB")
-            print(f"    - Gradients + Optimizer: {(memory_req['gradients'] + memory_req['optimizer']) / (1024**2):.1f}MB")
+            print("  - GPU:")
+            print(f"    - Memory: {gpu_info['total'] / (1024**3):.1f}GB total, {gpu_info['available'] / (1024**3):.1f}GB available")
             
             # Calculate maximum parallel models that can fit while keeping original batch size
             # Use 75% of available memory for safety
@@ -675,20 +628,19 @@ class Trainer:
             # Limit to requested number of configurations
             optimal_parallel_count = min(num_configs, max_parallel_with_full_batch)
             
-            print(f"  - Optimal parallel streams: {optimal_parallel_count} (requested: {num_configs})")
-            print(f"  - Batch size: {self.batch_size} (preserved)")
+            print(f"    - Optimal parallel streams: {optimal_parallel_count} (requested: {num_configs})")
             
             if optimal_parallel_count < num_configs:
                 remaining = num_configs - optimal_parallel_count
-                print(f"  - ⚠️  Memory constraint: Will use hybrid approach")
-                print(f"    - Parallel: {optimal_parallel_count} models simultaneously")
-                print(f"    - Sequential: {remaining} models in subsequent batches")
+                print(f"    - Memory constraint:")
+                print(f"      - Parallel: {optimal_parallel_count} models simultaneously")
+                print(f"      - Sequential: {remaining} models in subsequent batches")
             else:
-                print(f"  - ✅ Full parallel mode: All {num_configs} models can train simultaneously")
+                print(f"  - Parallel mode: All {num_configs} models will train simultaneously")
             
             return optimal_parallel_count, self.batch_size  # Keep original batch size
         else:
-            print("  - Warning: CUDA not available, falling back to CPU sequential training")
+            print(".   - Warning: CUDA not available, falling back to CPU sequential training")
             return 1, self.batch_size
 
     def get_gpu_memory_info(self):
