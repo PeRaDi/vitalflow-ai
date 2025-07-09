@@ -60,9 +60,7 @@ class Forecaster:
         future_dates = [last_training_date + timedelta(days=i) for i in range(1, 31)]
         predictions = []
         
-        if use_prophet and prophet_model and len(seasonality_features) > 0:
-            print(f"<!> Using Prophet seasonality features for forecasting")
-            
+        if use_prophet and prophet_model and len(seasonality_features) > 0:            
             recent_data = self.db.get_item_data(item_id)
             if not recent_data:
                 raise ValueError(f"No recent data found for item_id {item_id}")
