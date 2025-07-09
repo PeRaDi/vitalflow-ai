@@ -13,7 +13,12 @@ class RabbitQueue:
             credentials = pika.PlainCredentials(
                 os.getenv('RABBITMQ_USERNAME'),
                 os.getenv('RABBITMQ_PASSWORD')
-            )
+            ),
+            heartbeat=0, 
+            blocked_connection_timeout=None,  
+            socket_timeout=None, 
+            connection_attempts=1, 
+            retry_delay=0  
         ))
         self.channel = self.connection.channel()
         
@@ -46,7 +51,6 @@ class RabbitQueue:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
     def exec(self, payload):
-        print(f"<!> Executing task with payload {payload}")
         try:
             result = self.op.exec(payload)
             print(f"<!> Task executed successfully with result {result}")

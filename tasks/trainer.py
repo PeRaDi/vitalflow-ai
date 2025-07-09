@@ -86,20 +86,6 @@ class Trainer:
         
         return X_train, y_train, X_test, y_test, scaler, feature_names
 
-    def train_model(self, model, train_loader, criterion, optimizer):
-        model.train()
-        for epoch in range(self.epochs):
-            total_loss = 0
-            for X_batch, y_batch in train_loader:
-                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                optimizer.zero_grad()
-                y_pred = model(X_batch)
-                loss = criterion(y_pred, y_batch)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-            print(f"<!> Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
-
     def exec(self, payload):
         item_id = payload['item_id']
         print("-" * 50)
@@ -123,6 +109,7 @@ class Trainer:
             seasonality_combinations = self.prophet_extractor.get_seasonality_combinations()
             
             for config in seasonality_combinations:
+                print(f"  - Testing configuration: {config['features']}")
                 result = self.train_and_evaluate_config(data, config)
                 if result:
                     all_results.append(result)
@@ -264,91 +251,6 @@ class Trainer:
 
         return payload
 
-    def evaluate_model(self, model, test_loader):
-        """
-        Evaluate the model on test data and return comprehensive metrics
-        """
-        model.eval()
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for X_batch, y_batch in test_loader:
-                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                y_pred = model(X_batch)
-                all_predictions.extend(y_pred.cpu().numpy())
-                all_targets.extend(y_batch.cpu().numpy())
-        
-        # Convert to numpy arrays
-        predictions = np.array(all_predictions)
-        targets = np.array(all_targets)
-        
-        # Inverse transform to get original scale
-        predictions_orig = self.scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
-        targets_orig = self.scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
-        
-        # Calculate metrics
-        mse = mean_squared_error(targets_orig, predictions_orig)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(targets_orig, predictions_orig)
-        r2 = r2_score(targets_orig, predictions_orig)
-        
-        # Calculate percentage errors
-        mape = np.mean(np.abs((targets_orig - predictions_orig) / targets_orig)) * 100
-        
-        # Calculate directional accuracy (how often we predict the correct direction)
-        target_direction = np.diff(targets_orig) > 0
-        pred_direction = np.diff(predictions_orig) > 0
-        directional_accuracy = np.mean(target_direction == pred_direction) * 100
-        
-        metrics = {
-            'mse': float(mse),
-            'rmse': float(rmse),
-            'mae': float(mae),
-            'r2_score': float(r2),
-            'mape': float(mape),
-            'directional_accuracy': float(directional_accuracy),
-            'test_samples': len(targets_orig)
-        }
-        
-        return metrics, predictions_orig, targets_orig
-
-    def calculate_training_metrics(self, model, train_loader):
-        """
-        Calculate training metrics for comparison
-        """
-        model.eval()
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for X_batch, y_batch in train_loader:
-                X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
-                y_pred = model(X_batch)
-                all_predictions.extend(y_pred.cpu().numpy())
-                all_targets.extend(y_batch.cpu().numpy())
-        
-        predictions = np.array(all_predictions)
-        targets = np.array(all_targets)
-        
-        # Inverse transform to get original scale
-        predictions_orig = self.scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
-        targets_orig = self.scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
-        
-        # Calculate basic metrics
-        mse = mean_squared_error(targets_orig, predictions_orig)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(targets_orig, predictions_orig)
-        r2 = r2_score(targets_orig, predictions_orig)
-        
-        return {
-            'train_mse': float(mse),
-            'train_rmse': float(rmse),
-            'train_mae': float(mae),
-            'train_r2': float(r2),
-            'train_samples': len(targets_orig)
-        }
-
     def save_evaluation_report(self, item_id, metrics, predictions, targets):
         """
         Save detailed evaluation report as JSON for further analysis
@@ -425,7 +327,7 @@ class Trainer:
                     total_loss += loss.item()
                 
                 if (epoch + 1) % 10 == 0:  # Print every 10 epochs
-                    print(f"    Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
+                    print(f"      Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
             
             # Evaluate model
             model.eval()
