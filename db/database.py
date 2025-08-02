@@ -40,19 +40,33 @@ class Database:
             raise RuntimeError("<!> DB: Database connection has not been established.")
         return self.conn
     
+    def get_item_info(self, item_id: int) -> Dict:
+        """Fetches item information from the database."""
+        cursor = self.conn.cursor()
+        cursor.execute(f"""SELECT id, lead_time, frequent_order FROM items WHERE id = {item_id};""")
+        item_info = cursor.fetchone()
+        
+        cursor.close()
+        if not item_info:
+            return None
+        return {
+            'id': item_info[0],
+            'lead_time': int(item_info[1]),
+            'frequent_order': bool(item_info[2])
+        }
+    
     def get_item_data(self, item_id: int) -> Dict:
         """Fetches item data from the database."""
         cursor = self.conn.cursor()
         cursor.execute(f"""
             SELECT
-                DATE(st.created_at) AS date,
-                SUM(st.quantity) AS daily_quantity_out
-            FROM stock_transactions st
-            JOIN item_stock ist ON st.item_stock_id = ist.id
-            WHERE ist.item_id = {item_id} 
-                AND st.transaction_type_id = 2
-            GROUP BY DATE(st.created_at)
-            ORDER BY DATE(st.created_at);     
+                DATE(created_at) AS date,
+                SUM(quantity) AS daily_quantity_out
+            FROM stock_transactions
+            WHERE item_id = {item_id} 
+                AND transaction_type_id = 2
+            GROUP BY DATE(created_at)
+            ORDER BY DATE(created_at);     
         """)
         data = cursor.fetchall()
         

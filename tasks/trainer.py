@@ -4,11 +4,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import gc
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from torch.utils.data import DataLoader
 from datetime import datetime
-import requests
 import json
 import threading
 import logging
@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.bilstm_model import BiLSTMModel
 from models.demand_dataset import DemandDataset
 from models.prophet_seasonality import ProphetSeasonalityExtractor
-import warnings
+from cdn.cdn import upload_model
 
 class Trainer:
     def __init__(self, db, device):
@@ -35,13 +35,24 @@ class Trainer:
         self.use_prophet = False
         self.print_lock = threading.Lock() 
         self._suppress_prophet_logs()
+    
+    def cleanup_gpu_memory(self, aggressive=False):
+        """Comprehensive GPU memory cleanup"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            if aggressive:
+                # More aggressive cleanup
+                torch.cuda.synchronize()
+                if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                    torch.cuda.reset_peak_memory_stats()
+                # Force garbage collection multiple times
+                for _ in range(3):
+                    gc.collect()
+                torch.cuda.empty_cache()
         
     def _suppress_prophet_logs(self):
-        warnings.filterwarnings("ignore", message="Importing plotly failed")
-        warnings.filterwarnings("ignore", message=".*plotly.*", category=UserWarning)
-        logging.getLogger('prophet').setLevel(logging.ERROR)
-        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
-        logging.getLogger('prophet.forecaster').setLevel(logging.ERROR)
+        logging.getLogger('prophet').setLevel(logging.WARNING)
         logging.getLogger('cmdstanpy').disabled = True
 
     def create_sequences(self, data, seq_length):
@@ -106,6 +117,9 @@ class Trainer:
         print(f"<!> TRAINING ITEM_ID: {item_id}")
         save_path = payload.get('save_path', f'prophet_bilstm_model_item_{item_id}.pth')
         
+        # Aggressive cleanup before starting training
+        self.cleanup_gpu_memory(aggressive=True)
+        
         data = self.db.get_item_data(item_id)
         if not data:
             raise ValueError(f"No data found for item_id {item_id}")
@@ -115,69 +129,79 @@ class Trainer:
         prophet_df = self.prophet_extractor.preprocess_for_prophet(prophet_data)
         has_enough_data, _ = self.prophet_extractor.check_data_volume(prophet_df)
         
-        if has_enough_data:
-            print(f"  - Prophet? : Yes")
-            
-            # Test all seasonality combinations in parallel
-            seasonality_combinations = self.prophet_extractor.get_seasonality_combinations()
-            all_results = self.train_configs_parallel(data, seasonality_combinations)
-            
-            if not all_results:
-                raise ValueError("No valid configurations could be trained")
-            
-            # Select best model based on RMSE (lower is better)
-            best_result = min(all_results, key=lambda x: x['metrics']['rmse'])
-            
-            # Store best model configuration
-            self.best_model_config = best_result['config']
-            self.use_prophet = len(best_result['config']['features']) > 0
-            self.seasonality_features = best_result['config']['features']
+        best_result = None
+        model = None
+        scaler = None
+        test_metrics = None
+        
+        try:
+            if has_enough_data:
+                print(f"  - Prophet? : Yes")
+                
+                # Test all seasonality combinations in parallel
+                seasonality_combinations = self.prophet_extractor.get_seasonality_combinations()
+                all_results = self.train_configs_parallel(data, seasonality_combinations)
+                
+                if not all_results:
+                    raise ValueError("No valid configurations could be trained")
+                
+                # Select best model based on RMSE (lower is better)
+                best_result = min(all_results, key=lambda x: x['metrics']['rmse'])
+                
+                # Store best model configuration
+                self.best_model_config = best_result['config']
+                self.use_prophet = len(best_result['config']['features']) > 0
+                self.seasonality_features = best_result['config']['features']
 
-            # Use best model and its results
-            model = best_result['model']
-            scaler = best_result['scaler']
-            test_metrics = best_result['metrics']
-            
-            # Save comparison results
-            comparison_report = {
-                'item_id': item_id,
-                'timestamp': datetime.now().isoformat(),
-                'data_years': (prophet_df['ds'].max() - prophet_df['ds'].min()).days / 365.25,
-                'best_config': best_result['config']['name'],
-                'best_features': best_result['config']['features'],
-                'best_metrics': best_result['metrics'],
-                'all_results': [
-                    {
-                        'config': r['config']['name'],
-                        'features': r['config']['features'],
-                        'metrics': r['metrics']
-                    }
-                    for r in all_results
-                ]
-            }
-            
-            comparison_path = f'model_comparison_item_{item_id}.json'
-            with open(comparison_path, 'w') as f:
-                json.dump(comparison_report, f, indent=2)
-            
-        else:
-            print(f"  - Prophet? : No")
-            
-            # Fallback to simple LSTM without seasonality
-            fallback_config = {'features': [], 'name': 'Simple_LSTM_Fallback', 'weekly': False, 'yearly': False, 'monthly': False}
-            result = self.train_and_evaluate_config(data, fallback_config)
-            
-            if not result:
-                raise ValueError("Fallback configuration failed")
-            
-            # Use fallback results
-            model = result['model']
-            scaler = result['scaler']
-            test_metrics = result['metrics']
-            
-            self.best_model_config = fallback_config
-            self.use_prophet = False
-            self.seasonality_features = []
+                # Use best model and its results
+                model = best_result['model']
+                scaler = best_result['scaler']
+                test_metrics = best_result['metrics']
+                
+                # Save comparison results
+                comparison_report = {
+                    'item_id': item_id,
+                    'timestamp': datetime.now().isoformat(),
+                    'data_years': (prophet_df['ds'].max() - prophet_df['ds'].min()).days / 365.25,
+                    'best_config': best_result['config']['name'],
+                    'best_features': best_result['config']['features'],
+                    'best_metrics': best_result['metrics'],
+                    'all_results': [
+                        {
+                            'config': r['config']['name'],
+                            'features': r['config']['features'],
+                            'metrics': r['metrics']
+                        }
+                        for r in all_results
+                    ]
+                }
+                
+                comparison_path = f'model_comparison_item_{item_id}.json'
+                with open(comparison_path, 'w') as f:
+                    json.dump(comparison_report, f, indent=2)
+                
+            else:
+                print(f"  - Prophet? : No")
+                
+                # Fallback to simple LSTM without seasonality
+                fallback_config = {'features': [], 'name': 'Simple_LSTM_Fallback', 'weekly': False, 'yearly': False, 'monthly': False}
+                result = self.train_and_evaluate_config(data, fallback_config)
+                
+                if not result:
+                    raise ValueError("Fallback configuration failed")
+                
+                # Use fallback results
+                model = result['model']
+                scaler = result['scaler']
+                test_metrics = result['metrics']
+                
+                self.best_model_config = fallback_config
+                self.use_prophet = False
+                self.seasonality_features = []
+                
+        finally:
+            # Always cleanup after training, regardless of success or failure
+            self.cleanup_gpu_memory(aggressive=True)
         
         # Calculate training metrics
         train_metrics = self.calculate_training_metrics_from_model(model, scaler, data)
@@ -187,8 +211,8 @@ class Trainer:
         
         # Save evaluation report
         report_path = self.save_evaluation_report(item_id, all_metrics, 
-                                                 best_result['predictions'] if has_enough_data else result['predictions'],
-                                                 best_result['targets'] if has_enough_data else result['targets'])
+                                                 best_result['predictions'] if has_enough_data and best_result else result['predictions'],
+                                                 best_result['targets'] if has_enough_data and best_result else result['targets'])
         
         # Print evaluation results
         print(f"  - Model Evaluation Results for item_id {item_id}:")
@@ -223,20 +247,13 @@ class Trainer:
             
         torch.save(model_data, save_path)
         
-        # Upload to CDN
-        host = f"http://{os.getenv('CDN_HOST')}"
-        path = f"{os.getenv('CDN_MODELS_PATH')}/prophet_bilstm_model_item_{item_id}.pth"
-        auth = (os.getenv('CDN_USERNAME'), os.getenv('CDN_PASSWORD'))
-        url = f"{host}/{path}"
-
-        print(f"  - Uploading model to {host}/{path}")
-        with open(save_path, 'rb') as f:
-            headers = {"Content-Type": "application/octet-stream"}
-            response = requests.put(url, headers=headers, data=f, auth=auth)
-            response.raise_for_status()
-            f.close()
-        
+        print(f"  - Uploading model to CDN")
+        upload_model(save_path, item_id)
         os.remove(save_path)
+        
+        # Final aggressive cleanup before completing
+        self.cleanup_gpu_memory(aggressive=True)
+        
         print(f"  - Done")
         
         # Add evaluation metrics to payload
@@ -297,6 +314,7 @@ class Trainer:
 
     def train_and_evaluate_config(self, data, config):
         """Train and evaluate a model with specific seasonality configuration"""
+        model = None
         try:
             X_train, y_train, X_test, y_test, scaler, feature_names = self.prepare_data_with_config(data, config)
             
@@ -385,6 +403,13 @@ class Trainer:
                 'test_samples': len(targets_orig)
             }
             
+            # Clean up intermediate variables
+            del X_train, y_train, X_test, y_test
+            del train_dataset, test_dataset, train_loader, test_loader
+            del criterion, optimizer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             return {
                 'config': config,
                 'metrics': metrics,
@@ -397,6 +422,12 @@ class Trainer:
             
         except Exception as e:
             print(f"    Error with configuration {config['name']}: {e}")
+            # Clean up on error
+            if model is not None:
+                del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
             return None
 
     def train_configs_parallel(self, data, seasonality_combinations):
@@ -493,6 +524,12 @@ class Trainer:
             
             # Clear GPU memory between batches
             if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                # More aggressive cleanup between batches
+                torch.cuda.synchronize()
+                for _ in range(2):
+                    gc.collect()
                 torch.cuda.empty_cache()
             
             print(f"  - Batch {batch_num} completed. {len(batch_results)} successful, {len(remaining_configs)} remaining.")

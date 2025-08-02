@@ -3,40 +3,25 @@ import torch
 import numpy as np
 import requests
 import pandas as pd
+import gc
 from datetime import datetime, timedelta
 from models.bilstm_model import BiLSTMModel
+from cdn.cdn import download_model
 from tasks.forecaster.safety_stock_calculator import SafetyStockCalculator
-import logging
-import warnings
 
 class Forecaster:
     def __init__(self, db, device):
         self.db = db
         self.device = device
         self.seq_length = 30
-
-    def _suppress_prophet_logs(self):
-        warnings.filterwarnings("ignore", message="Importing plotly failed")
-        warnings.filterwarnings("ignore", message=".*plotly.*", category=UserWarning)
-        logging.getLogger('prophet').setLevel(logging.ERROR)
-        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
-        logging.getLogger('prophet.forecaster').setLevel(logging.ERROR)
-        logging.getLogger('cmdstanpy').disabled = True
-
-    def download_model(self, model):
-        host = f"http://{os.getenv('CDN_HOST')}"
-        path = f"{os.getenv('CDN_MODELS_PATH')}/{model}"
-        auth = (os.getenv('CDN_USERNAME'), os.getenv('CDN_PASSWORD'))
-        url = f"{host}/{path}"
-        
-        response = requests.get(url, auth=auth)
-        if response.status_code != 200:
-            raise ValueError(f"Failed to download model {model}: {response.status_code}")
-        
-        with open(model, 'wb') as f:
-            f.write(response.content)
-        
-        return model
+    
+    def cleanup_gpu_memory(self):
+        """Explicit GPU memory cleanup"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                torch.cuda.reset_peak_memory_stats()
     
     def load_model(self, model_path):
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
@@ -66,11 +51,13 @@ class Forecaster:
         
         return model, scaler, last_training_date, use_prophet, seasonality_features, prophet_model, best_config
     
-    def forecast(self, model, scaler, last_training_date, use_prophet, seasonality_features, prophet_model, best_config, item_id):
-        future_dates = [last_training_date + timedelta(days=i) for i in range(1, 31)]
+    def forecast(self, model, scaler, last_training_date, use_prophet, seasonality_features, prophet_model, best_config, item_id, days_to_forecast):
+        future_dates = [last_training_date + timedelta(days=i) for i in range(1, days_to_forecast + 1)]
         predictions = []
         
-        if use_prophet and prophet_model and len(seasonality_features) > 0:            
+        if use_prophet and prophet_model and len(seasonality_features) > 0:
+            print(f"<!> Using Prophet seasonality features for forecasting")
+            
             recent_data = self.db.get_item_data(item_id)
             if not recent_data:
                 raise ValueError(f"No recent data found for item_id {item_id}")
@@ -99,8 +86,7 @@ class Forecaster:
             
             input_seq = normalized_input.reshape(1, 30, len(seasonality_features) + 1)
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).to(self.device)
-            
-            for day_idx in range(30):
+            for day_idx in range(days_to_forecast):
                 future_date = future_dates[day_idx]
                 season_row = seasonality_df[seasonality_df['ds'] == future_date]
 
@@ -119,13 +105,12 @@ class Forecaster:
                 input_seq = np.roll(input_seq, -1, axis=1)
                 input_seq[0, -1] = normalized_new_features
                 input_tensor = torch.tensor(input_seq, dtype=torch.float32).to(self.device)
-        
         else:            
             # Simple LSTM forecasting without seasonality
             input_seq = np.zeros((1, self.seq_length, 1))
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).to(self.device)
-            
-            for _ in range(30):
+
+            for _ in range(days_to_forecast):
                 with torch.no_grad():
                     prediction = model(input_tensor).cpu().numpy()[0, 0]
                 
@@ -146,7 +131,15 @@ class Forecaster:
             # For simple LSTM, direct inverse transform
             predictions_orig = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
         
-        forecast_df = pd.DataFrame({'date': future_dates, 'forecast': predictions_orig})
+        forecast_df = pd.DataFrame({'date': future_dates[:len(predictions_orig)], 'forecast': predictions_orig})
+
+        # Clean up tensors and intermediate variables
+        if 'input_tensor' in locals():
+            del input_tensor
+        if 'predictions' in locals():
+            del predictions
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print(f"  - Done")
         return forecast_df
@@ -161,19 +154,55 @@ class Forecaster:
     def exec(self, payload):
         item_id = payload['item_id']
         print("-" * 50)
-        print(f"<!> TRAINING ITEM_ID: {item_id}")
-        model = f"prophet_bilstm_model_item_{item_id}.pth"
+        print(f"<!> FORECASTING ITEM_ID: {item_id}")
+
+        # Clear GPU memory before starting
+        self.cleanup_gpu_memory()
+
+        item_info = self.db.get_item_info(item_id)
+        if not item_info:
+            raise ValueError(f"Item with ID {item_id} not found in the database.")  
+        
+        days_to_forecast = None
+        if(item_info['frequent_order']):
+            days_to_forecast = item_info['lead_time'] * 3
+        else:
+            if item_info['lead_time'] * 3 <= 30:
+                days_to_forecast = 30
+            else:
+                days_to_forecast = item_info['lead_time'] * 3
+        
+        model = None
+        scaler = None
+        forecast_df = None
         
         try:
-            model_path = self.download_model(model)
+            model_name = f"prophet_bilstm_model_item_{item_id}.pth"
+            model_path = download_model(model_name)
             model, scaler, last_transaction_date, use_prophet, seasonality_features, prophet_model, best_config = self.load_model(model_path)
-            forecast_df = self.forecast(model, scaler, last_transaction_date, use_prophet, seasonality_features, prophet_model, best_config, item_id)
+            forecast_df = self.forecast(model, scaler, last_transaction_date, use_prophet, seasonality_features, prophet_model, best_config, item_id, days_to_forecast)
             os.remove(model_path)
+            
+            # Explicit cleanup of model
+            del model
+            del scaler
+            if 'prophet_model' in locals():
+                del prophet_model
+            self.cleanup_gpu_memory()
+            
         except Exception as e:
             print(f"<!> Error loading Prophet model, falling back to simple LSTM: {e}")
-            model = f"lstm_model_item_{item_id}.pth"
+            
+            # Cleanup any partially loaded resources
+            if model is not None:
+                del model
+            if scaler is not None:
+                del scaler
+            self.cleanup_gpu_memory()
+            
+            model_name = f"lstm_model_item_{item_id}.pth"
             try:
-                model_path = self.download_model(model)
+                model_path = download_model(model_name)
                 checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
                 
                 model = BiLSTMModel(input_size=1, hidden_size=128, num_layers=3, output_size=1).to(self.device)
@@ -182,13 +211,31 @@ class Forecaster:
                 
                 scaler = checkpoint['scaler']
                 last_training_date = datetime.fromisoformat(checkpoint.get('training_date'))
-                forecast_df = self.forecast(model, scaler, last_training_date, False, [], None, {}, item_id)
+                forecast_df = self.forecast(model, scaler, last_training_date, False, [], None, {}, item_id, days_to_forecast)
                 os.remove(model_path)
+                
+                # Explicit cleanup of fallback model
+                del model
+                del scaler
+                del checkpoint
+                self.cleanup_gpu_memory()
+                
             except Exception as e2:
                 print(f"<!> Error loading fallback model: {e2}")
+                # Final cleanup on error
+                if model is not None:
+                    del model
+                if scaler is not None:
+                    del scaler
+                self.cleanup_gpu_memory()
                 raise e2
 
         forecasted_value = forecast_df['forecast'].sum()
-        safetyStockCalculator = SafetyStockCalculator(self.db, item_id, 7, 30, forecasted_value)
+        safetyStockCalculator = SafetyStockCalculator(self.db, item_id, item_info['lead_time'], days_to_forecast, forecasted_value)
 
-        return safetyStockCalculator.exec()
+        result = safetyStockCalculator.exec()
+        
+        # Final cleanup before returning
+        self.cleanup_gpu_memory()
+        
+        return result

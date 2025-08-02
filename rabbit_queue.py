@@ -3,6 +3,9 @@ from tasks.trainer import Trainer
 import pika
 import json
 import os
+import torch
+import gc
+from cdn.cdn import exists_model
 
 class RabbitQueue:
     def __init__(self, db, type, device):
@@ -40,6 +43,20 @@ class RabbitQueue:
     def on_request(self, ch, method, props, body):
         data = json.loads(body)["data"]
         job_id = data["job_id"]
+
+        if(self.type == 'forecaster'):
+            if not exists_model(data['item_id']):
+                ch.basic_publish(
+                    exchange='',
+                    routing_key=props.reply_to,
+                    properties=pika.BasicProperties(
+                        correlation_id=props.correlation_id
+                    ),
+                    body=(json.dumps({"status": "NOT_FOUND"}))
+                )
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                return
+
         
         ch.basic_publish(
             exchange='',
@@ -57,8 +74,18 @@ class RabbitQueue:
     def exec(self, payload):
         try:
             result = self.op.exec(payload)
+            
+            # Explicit GPU memory cleanup after each job
+            if self.type == 'forecaster' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                
             return {"success": True, "data": result}
         except Exception as e:
+            # Cleanup on error as well
+            if self.type == 'forecaster' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
             return {"success": False, "error": str(e)}
     
     def post_to_backend_queue(self, job_id, message):
